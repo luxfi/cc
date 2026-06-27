@@ -11,6 +11,7 @@
 package nvidia
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ var (
 	ErrReportMissingArch    = errors.New("nvidia/report: missing architecture")
 	ErrReportUnknownArch    = errors.New("nvidia/report: unknown architecture")
 	ErrReportNoMeasurements = errors.New("nvidia/report: no measurements present")
+	ErrReportBadSPDM        = errors.New("nvidia/report: malformed SPDM request/response encoding")
 )
 
 // SupportedEvidenceVersions enumerates the report-envelope versions
@@ -64,8 +66,11 @@ type rawReport struct {
 	VBIOSVersion    string        `json:"vbios_version"`
 	NonceHex        string        `json:"nonce"`
 	Measurements    []Measurement `json:"measurements"`
-	CertChain       []string      `json:"cert_chain"`        // PEM blocks
-	Quote           string        `json:"attestation_quote"` // base64 binary
+	CertChain       []string      `json:"cert_chain"`        // PEM blocks, leaf first
+	Quote           string        `json:"attestation_quote"` // legacy alias for spdm_response
+	SPDMRequest     string        `json:"spdm_request"`      // base64: GET_MEASUREMENTS (0xE0)
+	SPDMResponse    string        `json:"spdm_response"`     // base64: signed MEASUREMENTS (0x60)
+	SPDMAsymAlgo    string        `json:"spdm_asym_algo"`    // e.g. "ecdsa-p384-sha384"
 	NVSwitchPresent bool          `json:"nvswitch_present"`
 }
 
@@ -78,9 +83,19 @@ type GPUReport struct {
 	DriverVersion   string
 	VBIOSVersion    string
 	Nonce           [32]byte
-	Measurements    []Measurement
-	CertChain       []string // PEM blocks (verified at NRAS, kept for audit)
-	QuoteB64        string
+	Measurements    []Measurement // CLAIMED measurements (untrusted labels); the
+	// trusted values come from the signed SPDM record, not from here.
+	CertChain []string // leaf-first PEM blocks; chained to the pinned NVIDIA root
+
+	// SPDMRequest / SPDMResponse are the binary SPDM GET_MEASUREMENTS (0xE0)
+	// request and signed MEASUREMENTS (0x60) response. These ARE the GPU's
+	// cryptographic evidence — the local verifier checks the response
+	// signature with the leaf key and extracts measurements from the signed
+	// record. Empty for an NRAS-only envelope.
+	SPDMRequest  []byte
+	SPDMResponse []byte
+	SPDMAsymAlgo string // negotiated signature algorithm name (may be empty -> P-384)
+
 	NVSwitchPresent bool
 }
 
@@ -123,6 +138,23 @@ func ParseGPUReport(data []byte) (*GPUReport, error) {
 		r.Measurements[i].Value = raw
 	}
 
+	// The signed SPDM response is carried under "spdm_response"; the legacy
+	// "attestation_quote" key is accepted as an alias. Decode both SPDM
+	// fields if present (they are optional at parse time — the local
+	// verifier enforces their presence, the NRAS path ignores them).
+	respB64 := r.SPDMResponse
+	if respB64 == "" {
+		respB64 = r.Quote
+	}
+	spdmResp, err := decodeOptionalB64(respB64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: spdm_response: %v", ErrReportBadSPDM, err)
+	}
+	spdmReq, err := decodeOptionalB64(r.SPDMRequest)
+	if err != nil {
+		return nil, fmt.Errorf("%w: spdm_request: %v", ErrReportBadSPDM, err)
+	}
+
 	rep := &GPUReport{
 		EvidenceVersion: r.EvidenceVersion,
 		UUID:            r.GPUUUID,
@@ -131,11 +163,25 @@ func ParseGPUReport(data []byte) (*GPUReport, error) {
 		VBIOSVersion:    r.VBIOSVersion,
 		Measurements:    r.Measurements,
 		CertChain:       r.CertChain,
-		QuoteB64:        r.Quote,
+		SPDMRequest:     spdmReq,
+		SPDMResponse:    spdmResp,
+		SPDMAsymAlgo:    r.SPDMAsymAlgo,
 		NVSwitchPresent: r.NVSwitchPresent,
 	}
 	copy(rep.Nonce[:], nonceBytes)
 	return rep, nil
+}
+
+// decodeOptionalB64 decodes a base64 field that may be empty. It accepts
+// both standard and raw (unpadded) base64, returning nil for empty input.
+func decodeOptionalB64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(s)
 }
 
 // MeasurementMap returns measurements indexed by Name for fast lookup
