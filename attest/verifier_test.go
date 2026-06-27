@@ -233,57 +233,11 @@ func TestDispatch_RejectsUnknownKind(t *testing.T) {
 	}
 }
 
-// TestStubsReturnNotImplemented confirms the TDX stub FAILS LOUD —
-// returning ErrNotImplemented (a hard refusal callers must not paper
-// over) rather than silently returning a nil error. This guards against
-// an accidental future change that silently accepts evidence the
-// verifier hasn't actually checked, while keeping the failure
-// recoverable so request-handling goroutines do not crash the whole
-// process. The NVIDIA path is no longer a stub — see nvtrust_test.go.
-// When stage 2 of #222 lands, replace this test with a real TDX case.
-func TestStubsReturnNotImplemented(t *testing.T) {
-	cases := []struct {
-		name string
-		v    Verifier
-	}{
-		{"tdx", TDX{}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("%s.Verify panicked (must error-return instead): %v", c.name, r)
-				}
-			}()
-			rep, err := c.v.Verify(context.Background(), []byte{0x00})
-			if rep != nil {
-				t.Fatalf("%s.Verify returned non-nil report: %+v", c.name, rep)
-			}
-			if !errors.Is(err, ErrNotImplemented) {
-				t.Fatalf("%s.Verify returned %v, want ErrNotImplemented", c.name, err)
-			}
-		})
-	}
-}
-
-// TestDispatch_StubKindsReturnNotImplemented covers the Dispatch path
-// for the stub kinds: the entry point must surface ErrNotImplemented
-// instead of crashing.
-func TestDispatch_StubKindsReturnNotImplemented(t *testing.T) {
-	for _, kind := range []Kind{KindTDX} {
-		t.Run(string(kind), func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("Dispatch(%s) panicked: %v", kind, r)
-				}
-			}()
-			rep, err := Dispatch(context.Background(), kind, []byte{0x00})
-			if rep != nil {
-				t.Fatalf("Dispatch(%s) returned non-nil report: %+v", kind, rep)
-			}
-			if !errors.Is(err, ErrNotImplemented) {
-				t.Fatalf("Dispatch(%s) returned %v, want ErrNotImplemented", kind, err)
-			}
-		})
-	}
-}
+// All evidence Kinds are now real verifiers, each fail-closed on bad input
+// and covered in its own test file: SEV-SNP (this file), TDX (tdx_test.go),
+// and NVTrust (nvtrust_test.go). No stub Kinds remain, so the former
+// TestStubsReturnNotImplemented / TestDispatch_StubKindsReturnNotImplemented
+// (which asserted TDX returned ErrNotImplemented) have been retired now that
+// TDX is production-real. ErrNotImplemented stays a valid refusal sentinel:
+// any future stub Kind should ship its own fail-loud test alongside the
+// verifier, mirroring the SEV/TDX/NVTrust per-kind test layout.
