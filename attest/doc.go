@@ -7,27 +7,56 @@
 // (luxfi/tee), and the confidential-AI / proof-of-AI system (luxfi/ai). It
 // depends on none of them — attestation is its own orthogonal concern.
 //
-// One verifier, orthogonal hardware Kinds:
-//   - KindSEVSNP:  AMD SEV-SNP CPU. PRODUCTION (live VCEK fetch from AMD KDS,
-//                  full ARK→ASK→VCEK chain + report-signature verify).
-//   - KindTDX:     Intel TDX CPU. STUB (tracked at #222 stage 2; go-tdx-guest
-//                  + Intel PCS).
-//   - KindNVTrust: NVIDIA GPU confidential compute. PRODUCTION local-RIM mode
-//                  (cloud-free): parse the GPU evidence envelope, verify the
-//                  NVIDIA-signed Reference Integrity Manifest against the
-//                  operator-pinned key, and match every reported measurement
-//                  to the signed golden value. See nvtrust.go for the honest
-//                  scope (RIM-signature + measurement integrity; device-cert
-//                  SPDM chaining is the remote nvidia.NRASClient primitive).
+// One verifier framework, orthogonal hardware Kinds. Each Kind is a complete,
+// independent unit — its string tag, its Verifier implementation, and its
+// init()-time self-registration live together in one file:
+//
+//   - KindSEVSNP (sev.go):  AMD SEV-SNP CPU. PRODUCTION. Live VCEK fetch from
+//     the AMD KDS, full ARK→ASK→VCEK chain + report-signature verify via
+//     google/go-sev-guest. Measurement: the 48-byte launch digest.
+//   - KindTDX (tdx.go):     Intel TDX CPU. PRODUCTION. Full Intel DCAP v4 quote
+//     verification via google/go-tdx-guest: PCK chain (embedded in the quote)
+//     → Intel SGX Root CA, QE report signature, attestation-key binding, TD
+//     report ECDSA-P256 signature, and Intel PCS collateral (TCB status +
+//     revocation) — a downlevel or revoked platform is REFUSED. Measurement:
+//     SHA-384(MRTD || RTMR0..3), a single 48-byte launch+runtime root.
+//   - KindSGX (sgx.go):     Intel SGX enclave. PRODUCTION. Pure-Go DCAP ECDSA
+//     v3 quote verification: PCK chain → pinned Intel SGX Root CA, QE report
+//     signature, the DCAP attestation-key binding, and the ISV enclave-report
+//     signature. Measurement: MRENCLAVE || MRSIGNER (64 bytes).
+//   - KindNVTrust (nvtrust.go): NVIDIA GPU confidential compute. PRODUCTION,
+//     two modes behind one Kind. ModeLocal (cloud-free): chain the GPU device
+//     cert to an operator-pinned NVIDIA device root, verify the signed SPDM
+//     measurement record, and match every measurement by index to an
+//     NVIDIA-signed Reference Integrity Manifest. ModeNRAS: verify an NVIDIA
+//     Remote Attestation Service EAT/JWT against pinned signer keys. The
+//     fail-closed zero value is what self-registers; production callers build
+//     a configured verifier with NewNVTrust.
+//   - KindNitro (nitro.go): AWS Nitro Enclaves. PRODUCTION. CBOR/COSE_Sign1
+//     (ES384) attestation-document verification, chain to the pinned AWS Nitro
+//     Enclaves Root G1, with PCR / nonce / freshness policy. Measurement: PCR0
+//     (the enclave image digest).
+//   - KindARMCCA (armcca.go): ARM CCA realm. PENDING (v0.2.1). The registry
+//     leaves a clean slot; the Kind lands as a new file plus one init() line,
+//     no framework edit.
+//
+// Dispatch is a single registry lookup. Each Kind self-registers its verifier
+// from its file's init() via registerVerifier; Dispatch and RegisteredVerifier
+// resolve a Kind through that one registry. There is no switch to keep in sync,
+// and an unregistered Kind is refused with ErrUnsupportedKind — fail-closed,
+// never a silent pass.
 //
 // Layering:
 //
 //	caller (kms release gate, scheduler, AI trust-tier policy, indexer)
-//	  └── cc/attest.Verifier.Verify(ctx, evidence, opts...)        ◄── this package
-//	        ├── SEV-SNP    → google/go-sev-guest + AMD KDS         (PROD)
-//	        ├── Intel TDX  → google/go-tdx-guest + Intel PCS       (STUB)
-//	        └── NVIDIA GPU → attest/nvidia RIM-match (local)       (PROD)
-//	                         attest/nvidia.NRASClient (remote)     (primitive)
+//	  └── cc/attest.Dispatch(ctx, kind, evidence, opts...)          ◄── this package
+//	        │   (registry lookup — RegisteredVerifier(kind).Verify)
+//	        ├── KindSEVSNP  → google/go-sev-guest + AMD KDS              (PROD)
+//	        ├── KindTDX     → google/go-tdx-guest + Intel PCS (DCAP v4)  (PROD)
+//	        ├── KindSGX     → pure-Go Intel DCAP ECDSA quote             (PROD)
+//	        ├── KindNVTrust → attest/nvidia SPDM+device-chain+RIM (local)(PROD)
+//	        │                 attest/nvidia EAT verify           (NRAS)  (PROD)
+//	        └── KindNitro   → CBOR/COSE_Sign1 → AWS Nitro Root G1        (PROD)
 //
 // The caller supplies the evidence Kind out-of-band (e.g. by an envelope's
 // framing field) so the verifier never has to guess from byte heuristics.
@@ -37,11 +66,15 @@
 // Security invariants:
 //
 //   - Trust anchors are pinned per-vendor, never trusted from the evidence
-//     itself: AMD ARK/ASK ship embedded with go-sev-guest; the NVIDIA RIM
-//     signing key is operator-supplied via WithNVTrustTrustRoots (no
+//     itself: AMD ARK/ASK ship embedded with go-sev-guest; the Intel SGX Root
+//     CA is pinned (in-source for SGX, inside go-tdx-guest for TDX); the AWS
+//     Nitro Enclaves Root G1 is pinned in-source and fingerprint-checked; the
+//     NVIDIA device root and RIM signing keys are operator-supplied (no
 //     insecure default — an empty root set is refused).
-//   - Tests do not hit the network. KDS responses are pre-fetched
-//     into testdata/ and replayed via a SimpleGetter map.
-//   - A failed verify never falls back to "best effort"; callers must
-//     treat (nil, err) as "refuse the request".
+//   - Tests do not hit the network. Vendor collateral (KDS / PCS responses,
+//     RIM, EAT) is pre-fetched into testdata/ or generated against test roots,
+//     and replayed via injected getters / overridden test roots.
+//   - A failed verify never falls back to "best effort"; callers must treat
+//     (nil, err) as "refuse the request". ErrNotImplemented is reserved for a
+//     future fail-closed stub Kind and is just another refusal.
 package attest

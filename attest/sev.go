@@ -18,6 +18,11 @@ import (
 	"github.com/google/go-sev-guest/verify/trust"
 )
 
+// KindSEVSNP is the AMD SEV-SNP raw attestation report framing: a 0x4A0-byte
+// ABI report carrying no certificate chain (the VCEK leaf is fetched from the
+// AMD KDS at verify time).
+const KindSEVSNP Kind = "sev_snp"
+
 // SEVSNP is the production SEV-SNP verifier. It accepts a raw 0x4A0-byte
 // AMD SEV-SNP attestation report (no embedded cert chain) and:
 //
@@ -188,6 +193,8 @@ func cloneBytes(b []byte) []byte {
 	copy(out, b)
 	return out
 }
+
+func init() { registerVerifier(KindSEVSNP, SEVSNP{}) }
 
 // Compile-time guard: SEVSNP satisfies Verifier.
 var _ Verifier = SEVSNP{}

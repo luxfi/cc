@@ -22,6 +22,10 @@ import (
 	cose "github.com/veraison/go-cose"
 )
 
+// KindNitro is the AWS Nitro Enclaves framing: a CBOR-encoded COSE_Sign1
+// attestation document produced by the Nitro Security Module.
+const KindNitro Kind = "nitro"
+
 // Nitro is the production AWS Nitro Enclaves verifier.
 //
 // An AWS Nitro Enclaves attestation document is a CBOR-encoded COSE_Sign1
@@ -503,6 +507,8 @@ func sortedPCRIndices(pcrs map[uint64][]byte) []uint64 {
 	sort.Slice(idx, func(i, j int) bool { return idx[i] < idx[j] })
 	return idx
 }
+
+func init() { registerVerifier(KindNitro, Nitro{}) }
 
 // Compile-time guard: Nitro satisfies Verifier.
 var _ Verifier = Nitro{}
