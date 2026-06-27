@@ -246,10 +246,9 @@ func TestDispatch_RejectsUnknownKind(t *testing.T) {
 // TestRegistry_RoutesEveryKind proves the converged dispatch path: every
 // shipped Kind self-registered its verifier via init() (one registry, no
 // switch), RegisteredVerifier returns the right concrete verifier for each,
-// and Dispatch routes through that same registry. An unregistered Kind —
-// including the reserved-but-pending "armcca" slot — is fail-closed:
-// RegisteredVerifier reports absent and Dispatch refuses with
-// ErrUnsupportedKind, never a silent pass.
+// and Dispatch routes through that same registry. All six TEE/GPU vendors are
+// covered. An unregistered Kind is fail-closed: RegisteredVerifier reports
+// absent and Dispatch refuses with ErrUnsupportedKind, never a silent pass.
 func TestRegistry_RoutesEveryKind(t *testing.T) {
 	registered := []struct {
 		kind Kind
@@ -260,6 +259,7 @@ func TestRegistry_RoutesEveryKind(t *testing.T) {
 		{KindSGX, func(v Verifier) bool { _, ok := v.(SGX); return ok }},
 		{KindNVTrust, func(v Verifier) bool { _, ok := v.(NVTrust); return ok }},
 		{KindNitro, func(v Verifier) bool { _, ok := v.(Nitro); return ok }},
+		{KindARMCCA, func(v Verifier) bool { _, ok := v.(ARMCCA); return ok }},
 	}
 	for _, tc := range registered {
 		t.Run(string(tc.kind), func(t *testing.T) {
@@ -273,9 +273,9 @@ func TestRegistry_RoutesEveryKind(t *testing.T) {
 		})
 	}
 
-	// The pending ARM CCA slot and any bogus tag are unregistered: fail-closed
-	// at both the lookup and the dispatch boundary.
-	for _, kind := range []Kind{Kind("armcca"), Kind("madeup")} {
+	// A Kind no verifier installed is fail-closed at both the lookup and the
+	// dispatch boundary.
+	for _, kind := range []Kind{Kind("madeup"), Kind("tpm")} {
 		t.Run("unregistered/"+string(kind), func(t *testing.T) {
 			if v, ok := RegisteredVerifier(kind); ok {
 				t.Fatalf("unexpected verifier %T registered for unregistered Kind %q", v, kind)
