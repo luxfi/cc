@@ -36,9 +36,13 @@
 //     (ES384) attestation-document verification, chain to the pinned AWS Nitro
 //     Enclaves Root G1, with PCR / nonce / freshness policy. Measurement: PCR0
 //     (the enclave image digest).
-//   - KindARMCCA (armcca.go): ARM CCA realm. PENDING (v0.2.1). The registry
-//     leaves a clean slot; the Kind lands as a new file plus one init() line,
-//     no framework edit.
+//   - KindARMCCA (armcca.go): ARM CCA realm. PRODUCTION. A CBOR/COSE CCA
+//     attestation-token collection — the platform token (COSE_Sign1, signed by
+//     the operator-pinned per-SoC CPAK/IAK) and the realm token (signed by the
+//     realm RAK), with the platform↔realm binding H(RAK) enforced. The
+//     fail-closed zero value is what self-registers; production callers set
+//     ARMCCA.TrustAnchors (no pinned CPAK ⇒ refuse, no insecure mode).
+//     Measurement: the realm initial measurement (RIM).
 //
 // Dispatch is a single registry lookup. Each Kind self-registers its verifier
 // from its file's init() via registerVerifier; Dispatch and RegisteredVerifier
@@ -56,7 +60,8 @@
 //	        ├── KindSGX     → pure-Go Intel DCAP ECDSA quote             (PROD)
 //	        ├── KindNVTrust → attest/nvidia SPDM+device-chain+RIM (local)(PROD)
 //	        │                 attest/nvidia EAT verify           (NRAS)  (PROD)
-//	        └── KindNitro   → CBOR/COSE_Sign1 → AWS Nitro Root G1        (PROD)
+//	        ├── KindNitro   → CBOR/COSE_Sign1 → AWS Nitro Root G1        (PROD)
+//	        └── KindARMCCA  → CBOR/COSE CCA platform+realm tokens        (PROD)
 //
 // The caller supplies the evidence Kind out-of-band (e.g. by an envelope's
 // framing field) so the verifier never has to guess from byte heuristics.
@@ -69,8 +74,9 @@
 //     itself: AMD ARK/ASK ship embedded with go-sev-guest; the Intel SGX Root
 //     CA is pinned (in-source for SGX, inside go-tdx-guest for TDX); the AWS
 //     Nitro Enclaves Root G1 is pinned in-source and fingerprint-checked; the
-//     NVIDIA device root and RIM signing keys are operator-supplied (no
-//     insecure default — an empty root set is refused).
+//     NVIDIA device root and RIM signing keys, and the ARM CCA CPAK platform
+//     keys, are operator-supplied (no insecure default — an empty root set is
+//     refused).
 //   - Tests do not hit the network. Vendor collateral (KDS / PCS responses,
 //     RIM, EAT) is pre-fetched into testdata/ or generated against test roots,
 //     and replayed via injected getters / overridden test roots.

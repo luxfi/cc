@@ -52,9 +52,10 @@ var (
 
 	// ErrNotImplemented is the refusal sentinel a stub verifier returns so
 	// it fails loud instead of silently passing evidence it never checked.
-	// No shipped Kind is a stub today (SEV-SNP, TDX, SGX, NVTrust, and Nitro
-	// are all real); the sentinel stays part of the API so a future Kind can
-	// land as a fail-closed stub with its own test before its crypto does.
+	// No shipped Kind is a stub today (SEV-SNP, TDX, SGX, NVTrust, Nitro, and
+	// ARM CCA are all real); the sentinel stays part of the API so a future
+	// Kind can land as a fail-closed stub with its own test before its crypto
+	// does.
 	// Callers must treat it exactly like any other refusal: do not release,
 	// do not fall back.
 	ErrNotImplemented = errors.New("attest: verifier not yet implemented")
