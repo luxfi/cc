@@ -2,7 +2,10 @@ module github.com/luxfi/cc
 
 go 1.26.4
 
-require github.com/google/go-sev-guest v0.14.1
+require (
+	github.com/google/go-sev-guest v0.14.1
+	github.com/google/go-tdx-guest v0.3.1
+)
 
 require (
 	github.com/google/logger v1.1.1 // indirect
