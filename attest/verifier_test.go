@@ -233,11 +233,60 @@ func TestDispatch_RejectsUnknownKind(t *testing.T) {
 	}
 }
 
-// All evidence Kinds are now real verifiers, each fail-closed on bad input
-// and covered in its own test file: SEV-SNP (this file), TDX (tdx_test.go),
-// and NVTrust (nvtrust_test.go). No stub Kinds remain, so the former
-// TestStubsReturnNotImplemented / TestDispatch_StubKindsReturnNotImplemented
-// (which asserted TDX returned ErrNotImplemented) have been retired now that
-// TDX is production-real. ErrNotImplemented stays a valid refusal sentinel:
-// any future stub Kind should ship its own fail-loud test alongside the
-// verifier, mirroring the SEV/TDX/NVTrust per-kind test layout.
+// All evidence Kinds are now real verifiers, each fail-closed on bad input and
+// covered in its own test file: SEV-SNP (this file), TDX (tdx_test.go), SGX
+// (sgx_test.go), NVTrust (nvtrust_test.go), and Nitro (nitro_test.go). No stub
+// Kinds remain, so the former TestStubsReturnNotImplemented /
+// TestDispatch_StubKindsReturnNotImplemented (which asserted TDX returned
+// ErrNotImplemented) have been retired now that TDX is production-real.
+// ErrNotImplemented stays a valid refusal sentinel: a future stub Kind should
+// ship its own fail-loud test alongside the verifier, mirroring the per-Kind
+// test layout.
+
+// TestRegistry_RoutesEveryKind proves the converged dispatch path: every
+// shipped Kind self-registered its verifier via init() (one registry, no
+// switch), RegisteredVerifier returns the right concrete verifier for each,
+// and Dispatch routes through that same registry. An unregistered Kind —
+// including the reserved-but-pending "armcca" slot — is fail-closed:
+// RegisteredVerifier reports absent and Dispatch refuses with
+// ErrUnsupportedKind, never a silent pass.
+func TestRegistry_RoutesEveryKind(t *testing.T) {
+	registered := []struct {
+		kind Kind
+		is   func(Verifier) bool
+	}{
+		{KindSEVSNP, func(v Verifier) bool { _, ok := v.(SEVSNP); return ok }},
+		{KindTDX, func(v Verifier) bool { _, ok := v.(TDX); return ok }},
+		{KindSGX, func(v Verifier) bool { _, ok := v.(SGX); return ok }},
+		{KindNVTrust, func(v Verifier) bool { _, ok := v.(NVTrust); return ok }},
+		{KindNitro, func(v Verifier) bool { _, ok := v.(Nitro); return ok }},
+	}
+	for _, tc := range registered {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			v, ok := RegisteredVerifier(tc.kind)
+			if !ok {
+				t.Fatalf("Kind %q did not self-register via init()", tc.kind)
+			}
+			if !tc.is(v) {
+				t.Fatalf("Kind %q registered %T, want its own verifier type", tc.kind, v)
+			}
+		})
+	}
+
+	// The pending ARM CCA slot and any bogus tag are unregistered: fail-closed
+	// at both the lookup and the dispatch boundary.
+	for _, kind := range []Kind{Kind("armcca"), Kind("madeup")} {
+		t.Run("unregistered/"+string(kind), func(t *testing.T) {
+			if v, ok := RegisteredVerifier(kind); ok {
+				t.Fatalf("unexpected verifier %T registered for unregistered Kind %q", v, kind)
+			}
+			rep, err := Dispatch(context.Background(), kind, []byte{0x00})
+			if rep != nil {
+				t.Fatalf("Dispatch(%q) returned non-nil report on unregistered Kind", kind)
+			}
+			if !errors.Is(err, ErrUnsupportedKind) {
+				t.Fatalf("Dispatch(%q) err = %v, want ErrUnsupportedKind", kind, err)
+			}
+		})
+	}
+}

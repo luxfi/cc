@@ -16,6 +16,11 @@ import (
 	"github.com/luxfi/cc/attest/nvidia"
 )
 
+// KindNVTrust is the NVIDIA GPU confidential-compute framing: either a signed
+// SPDM measurement record plus device cert chain (ModeLocal) or an NVIDIA
+// Remote Attestation Service EAT token (ModeNRAS).
+const KindNVTrust Kind = "nvtrust"
+
 // NVTrust is the NVIDIA GPU confidential-compute attestation verifier. It
 // implements both NVIDIA trust models behind one Kind, selected by Mode:
 //
@@ -345,6 +350,37 @@ func canonicalNVTrustNRASBytes(eat *nvidia.EATResult, tokenHash [32]byte) []byte
 	}
 	return buf
 }
+
+// -----------------------------------------------------------------------------
+// Per-call policy options. These set fields on the shared config for a single
+// Verify call. They are distinct from the construction-time NVTrustOptions in
+// nvtrust_options.go, which pin per-deployment trust anchors on the verifier:
+// the RIM blob and its signing roots roll as drivers/VBIOS update, so they are
+// supplied per request, not pinned once at startup.
+// -----------------------------------------------------------------------------
+
+// WithNVTrustRIM supplies the signed NVIDIA Reference Integrity Manifest that
+// KindNVTrust evidence is matched against in ModeLocal. The RIM's detached
+// signature is verified against the roots from WithNVTrustTrustRoots before any
+// measurement is compared. Required for ModeLocal.
+func WithNVTrustRIM(rim []byte) Option {
+	return func(c *config) {
+		buf := make([]byte, len(rim))
+		copy(buf, rim)
+		c.nvtrustRIM = buf
+	}
+}
+
+// WithNVTrustTrustRoots pins the public keys that may sign the NVIDIA RIM. The
+// operator wires their NVIDIA RIM signing key(s) here. An empty set causes
+// ModeLocal to refuse — there is no insecure mode.
+func WithNVTrustTrustRoots(roots []nvidia.TrustRoot) Option {
+	return func(c *config) {
+		c.nvtrustTrustRoots = append([]nvidia.TrustRoot(nil), roots...)
+	}
+}
+
+func init() { registerVerifier(KindNVTrust, NVTrust{}) }
 
 // Compile-time guard: NVTrust satisfies Verifier.
 var _ Verifier = NVTrust{}

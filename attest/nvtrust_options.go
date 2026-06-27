@@ -23,13 +23,13 @@ type NVTrustOption func(*NVTrust)
 // Verifier and is the production entry point; the zero value (used by
 // Dispatch) is intentionally fail-closed.
 //
-// Registration note: this module dispatches Kinds through the switch in
-// Dispatch (KindNVTrust -> NVTrust{}). There is no init()-based registry in
-// the base module, so a configured verifier is wired by the caller (the kms
-// release gate / ai trust-tier policy) constructing NewNVTrust and using it
-// as a Verifier. If the dispatch layer later becomes an init-registry, the
-// nvtrust registration is one line — register NewNVTrust(defaults) — and
-// belongs in this file.
+// Registration note: the fail-closed zero value (NVTrust{}) self-registers
+// under KindNVTrust via init() in nvtrust.go, so Dispatch(KindNVTrust, ...)
+// resolves to the strict, no-roots verifier that refuses every input. A
+// production verifier is deliberately NOT the registry default: callers (the
+// kms release gate / ai trust-tier policy) construct a configured NewNVTrust
+// and use it as a Verifier directly, because the trust anchors are
+// deployment-specific and must never come from a wire-supplied Kind tag.
 func NewNVTrust(opts ...NVTrustOption) NVTrust {
 	var n NVTrust // zero value: ModeLocal, no roots (fail-closed)
 	for _, o := range opts {

@@ -8,20 +8,20 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/luxfi/cc/attest/nvidia"
 )
 
-// Kind tags the evidence framing the verifier should dispatch to.
+// Kind tags the evidence framing the verifier dispatches on. Each Kind's
+// string tag, its Verifier implementation, and its init()-time registration
+// live together in that Kind's own file — sev.go, tdx.go, sgx.go, nvtrust.go,
+// nitro.go, and (pending) armcca.go. This file owns only the framework: the
+// registry, Dispatch, the shared config, the common options, VerifiedReport,
+// and the error taxonomy. Adding a Kind is a new file plus one init() line; no
+// central edit, no switch to extend.
 type Kind string
-
-const (
-	KindSEVSNP  Kind = "sev_snp" // AMD SEV-SNP raw attestation report (ABI 0x4A0 bytes)
-	KindTDX     Kind = "tdx"     // Intel TDX TDREPORT / quote
-	KindNVTrust Kind = "nvtrust" // NVIDIA GPU CC attestation (local RIM-matched evidence)
-	KindNitro   Kind = "nitro"   // AWS Nitro Enclaves COSE_Sign1 attestation document
-)
 
 // Errors returned by the verifier package. Callers should switch on
 // errors.Is to distinguish refusal classes.
@@ -50,10 +50,13 @@ var (
 	// despite a cryptographically valid chain.
 	ErrPolicy = errors.New("attest: policy rejected verified evidence")
 
-	// ErrNotImplemented is returned by stub verifiers. Callers must
-	// treat this exactly like any other refusal: do not release, do not
-	// fall back. The error exists so #222-tracked verifiers fail loud
-	// instead of silently passing.
+	// ErrNotImplemented is the refusal sentinel a stub verifier returns so
+	// it fails loud instead of silently passing evidence it never checked.
+	// No shipped Kind is a stub today (SEV-SNP, TDX, SGX, NVTrust, and Nitro
+	// are all real); the sentinel stays part of the API so a future Kind can
+	// land as a fail-closed stub with its own test before its crypto does.
+	// Callers must treat it exactly like any other refusal: do not release,
+	// do not fall back.
 	ErrNotImplemented = errors.New("attest: verifier not yet implemented")
 )
 
@@ -193,33 +196,15 @@ func WithNow(t time.Time) Option {
 	return func(c *config) { c.now = t }
 }
 
-// WithKDSGetter installs a custom HTTPSGetter for the SEV-SNP path.
-// Used by tests to replay AMD KDS responses from disk. The argument
-// must implement github.com/google/go-sev-guest/verify/trust.HTTPSGetter;
-// the type is checked at the SEV verifier boundary.
+// WithKDSGetter installs a custom HTTPSGetter for the certificate-fetching
+// CPU paths. It is shared by SEV-SNP (AMD KDS) and TDX (Intel PCS/PCCS):
+// tests inject a replay map so the suite runs offline, production leaves it
+// nil so the live vendor service is used. The argument must implement the
+// relevant go-{sev,tdx}-guest verify/trust.HTTPSGetter; the type is checked
+// at each verifier boundary. Kind-specific options (WithNVTrust*, WithNitro*)
+// live in their own files.
 func WithKDSGetter(g any) Option {
 	return func(c *config) { c.kdsGetter = g }
-}
-
-// WithNVTrustRIM supplies the signed NVIDIA Reference Integrity Manifest
-// that KindNVTrust evidence is matched against. The RIM's detached
-// signature is verified against the roots from WithNVTrustTrustRoots before
-// any measurement is compared. Required for KindNVTrust.
-func WithNVTrustRIM(rim []byte) Option {
-	return func(c *config) {
-		buf := make([]byte, len(rim))
-		copy(buf, rim)
-		c.nvtrustRIM = buf
-	}
-}
-
-// WithNVTrustTrustRoots pins the public keys that may sign the NVIDIA RIM.
-// The operator wires their NVIDIA RIM signing key(s) here at startup. An
-// empty set causes KindNVTrust to refuse — there is no insecure mode.
-func WithNVTrustTrustRoots(roots []nvidia.TrustRoot) Option {
-	return func(c *config) {
-		c.nvtrustTrustRoots = append([]nvidia.TrustRoot(nil), roots...)
-	}
 }
 
 // Verifier verifies a single evidence blob.
@@ -237,22 +222,53 @@ type Verifier interface {
 	Verify(ctx context.Context, evidence []byte, opts ...Option) (*VerifiedReport, error)
 }
 
+// -----------------------------------------------------------------------------
+// Verifier registry — the single dispatch authority.
+//
+// Each Kind self-registers its verifier from its own file's init() via
+// registerVerifier. Dispatch and RegisteredVerifier are the only ways to reach
+// a verifier by Kind; there is no switch to keep in sync. An unregistered Kind
+// is refused with ErrUnsupportedKind — fail-closed, never a silent pass.
+// -----------------------------------------------------------------------------
+
+var (
+	registryMu sync.RWMutex
+	registry   = map[Kind]Verifier{}
+)
+
+// registerVerifier installs v as the verifier for kind. It is called from a
+// Kind file's init(); each Kind is registered in exactly one place. A
+// duplicate registration is a programmer error that fails loud at startup
+// rather than silently shadowing a verifier on the trust path.
+func registerVerifier(kind Kind, v Verifier) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if _, dup := registry[kind]; dup {
+		panic(fmt.Sprintf("attest: duplicate verifier registration for kind %q", kind))
+	}
+	registry[kind] = v
+}
+
+// RegisteredVerifier returns the verifier a Kind self-registered via init(),
+// or (nil, false) when no verifier is installed for kind.
+func RegisteredVerifier(kind Kind) (Verifier, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	v, ok := registry[kind]
+	return v, ok
+}
+
 // Dispatch routes evidence to the verifier registered for kind. Kind is
-// supplied out-of-band (e.g. by the C-ABI parser's framing field) so
-// the verifier never has to guess from byte heuristics.
+// supplied out-of-band (e.g. by an evidence envelope's framing field) so the
+// verifier never has to guess from byte heuristics. Routing is a single
+// registry lookup — an unregistered Kind is refused with ErrUnsupportedKind,
+// never a silent pass.
 func Dispatch(ctx context.Context, kind Kind, evidence []byte, opts ...Option) (*VerifiedReport, error) {
-	switch kind {
-	case KindSEVSNP:
-		return SEVSNP{}.Verify(ctx, evidence, opts...)
-	case KindTDX:
-		return TDX{}.Verify(ctx, evidence, opts...)
-	case KindNVTrust:
-		return NVTrust{}.Verify(ctx, evidence, opts...)
-	case KindNitro:
-		return Nitro{}.Verify(ctx, evidence, opts...)
-	default:
+	v, ok := RegisteredVerifier(kind)
+	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedKind, string(kind))
 	}
+	return v.Verify(ctx, evidence, opts...)
 }
 
 // applyOptions builds an immutable config from defaults + opts.

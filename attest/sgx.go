@@ -621,36 +621,10 @@ func intelSGXRootPool() (*x509.CertPool, error) {
 }
 
 // -----------------------------------------------------------------------------
-// Self-registration (driver pattern).
-//
-// The package's legacy Dispatch routes a fixed switch of Kinds in verifier.go.
-// New Kinds self-register here from their own file's init(), the open
-// extension point that needs no central edit. RegisteredVerifier is the
-// lookup; the intended end-state folds Dispatch's default case into it so
-// there is one routing path. Until then, KindSGX is reached via
-// RegisteredVerifier(KindSGX) or the SGX value directly.
+// Self-registration. The registry itself (registerVerifier / RegisteredVerifier
+// / Dispatch) is framework, in verifier.go; this Kind installs itself with one
+// init() line, the same as every other Kind.
 // -----------------------------------------------------------------------------
-
-var (
-	registryMu sync.RWMutex
-	registry   = map[Kind]Verifier{}
-)
-
-func registerVerifier(kind Kind, v Verifier) {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	registry[kind] = v
-}
-
-// RegisteredVerifier returns the verifier a Kind self-registered via init(),
-// if any. It is the driver-pattern lookup for Kinds added without editing the
-// central Dispatch switch.
-func RegisteredVerifier(kind Kind) (Verifier, bool) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	v, ok := registry[kind]
-	return v, ok
-}
 
 func init() { registerVerifier(KindSGX, SGX{}) }
 

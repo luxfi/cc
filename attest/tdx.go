@@ -17,6 +17,10 @@ import (
 	"github.com/google/go-tdx-guest/verify/trust"
 )
 
+// KindTDX is the Intel TDX framing: a raw Intel DCAP v4 TDX quote with the PCK
+// certificate chain embedded in its signed certification data.
+const KindTDX Kind = "tdx"
+
 // TDX is the production Intel TDX verifier. It accepts a raw Intel
 // DCAP v4 TDX quote (the bytes the guest reads from the TDX quote-
 // generation service) and performs the full DCAP attestation flow via
@@ -311,6 +315,8 @@ func canonicalTDXBytes(body *tdxpb.TDQuoteBody) []byte {
 	buf = append(buf, fixedSize(body.GetReportData(), 64)...)
 	return buf
 }
+
+func init() { registerVerifier(KindTDX, TDX{}) }
 
 // Compile-time guard: TDX satisfies Verifier.
 var _ Verifier = TDX{}
