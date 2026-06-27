@@ -20,6 +20,7 @@ const (
 	KindSEVSNP  Kind = "sev_snp" // AMD SEV-SNP raw attestation report (ABI 0x4A0 bytes)
 	KindTDX     Kind = "tdx"     // Intel TDX TDREPORT / quote
 	KindNVTrust Kind = "nvtrust" // NVIDIA GPU CC attestation (local RIM-matched evidence)
+	KindNitro   Kind = "nitro"   // AWS Nitro Enclaves COSE_Sign1 attestation document
 )
 
 // Errors returned by the verifier package. Callers should switch on
@@ -137,6 +138,20 @@ type config struct {
 	// Required for KindNVTrust; the verifier refuses an empty set (no
 	// insecure mode).
 	nvtrustTrustRoots []nvidia.TrustRoot
+
+	// nitroRoots overrides the trust anchor for the KindNitro certificate
+	// chain. Holds a *x509.CertPool; kept as any so verifier.go need not
+	// import crypto/x509 (mirrors kdsGetter). nil ⇒ the pinned AWS Nitro
+	// Enclaves root. Tests set a generated root; production leaves it nil.
+	nitroRoots any
+
+	// nitroExpectedPCRs, if non-empty, pins required KindNitro PCR values by
+	// index. Every supplied index must be present and equal, or ErrPolicy.
+	nitroExpectedPCRs map[uint][]byte
+
+	// nitroMaxAge, if > 0, bounds KindNitro document freshness against the
+	// document timestamp. Zero ⇒ no age bound.
+	nitroMaxAge time.Duration
 }
 
 // nowOrWall returns the pinned verification clock when set, else the wall
@@ -233,6 +248,8 @@ func Dispatch(ctx context.Context, kind Kind, evidence []byte, opts ...Option) (
 		return TDX{}.Verify(ctx, evidence, opts...)
 	case KindNVTrust:
 		return NVTrust{}.Verify(ctx, evidence, opts...)
+	case KindNitro:
+		return Nitro{}.Verify(ctx, evidence, opts...)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedKind, string(kind))
 	}
