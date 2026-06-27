@@ -36,11 +36,17 @@ var (
 	ErrRIMVersionMismatch = errors.New("nvidia/rim: driver/vbios version mismatch")
 )
 
-// RIMEntry is one row in the manifest: an expected measurement keyed
-// by name, with its expected hex-encoded value.
+// RIMEntry is one row in the manifest: an expected measurement value.
+// Name is a human/audit label. Index, when present, is the SPDM
+// measurement index this golden value pins — the binding the signed-record
+// path (MatchSPDM) uses, since SPDM measurement blocks are keyed by index,
+// not name. Index is a pointer so that index 0 is distinguishable from
+// "no index", and omitempty keeps name-only manifests byte-identical on
+// the wire (their detached signatures are unaffected).
 type RIMEntry struct {
 	Name     string `json:"name"`
 	ValueHex string `json:"value"`
+	Index    *uint8 `json:"index,omitempty"`
 }
 
 // rawRIM is the on-the-wire JSON. The signature block is detachable:
@@ -170,6 +176,57 @@ func (rim *RIM) Match(report *GPUReport) error {
 		}
 		if !bytesEqual(exp, m.Value) {
 			return fmt.Errorf("%w: name=%s", ErrRIMValueMismatch, m.Name)
+		}
+	}
+	return nil
+}
+
+// ErrRIMEntryNoIndex is returned by MatchSPDM when a RIM entry lacks the
+// index needed to bind it to a signed SPDM measurement block.
+var ErrRIMEntryNoIndex = errors.New("nvidia/rim: entry has no index for SPDM matching")
+
+// MatchSPDM validates that every golden value in the manifest is present
+// — by SPDM measurement index — among the cryptographically signed blocks
+// extracted from a verified MEASUREMENTS response. This is the trusted
+// match: blocks come from VerifySPDMMeasurementSignature, so a passing
+// match means "the GPU's signed measurements include exactly NVIDIA's
+// golden values for this driver/VBIOS".
+//
+// arch/driver/vbios are the envelope's claimed preconditions and must
+// equal the manifest's; the cryptographic gate, however, is value
+// equality against the SIGNED blocks. Extra signed blocks not named by the
+// manifest are allowed (NVIDIA reports more indices than any single RIM
+// pins); every manifest entry MUST be covered (completeness), which closes
+// the drop-a-bad-measurement attack.
+func (rim *RIM) MatchSPDM(arch, driver, vbios string, blocks []SPDMMeasurement) error {
+	if rim == nil {
+		return errors.New("nvidia/rim: nil rim")
+	}
+	if rim.Architecture != arch {
+		return fmt.Errorf("%w: rim=%s report=%s", ErrRIMArchMismatch, rim.Architecture, arch)
+	}
+	if rim.DriverVersion != driver || rim.VBIOSVersion != vbios {
+		return fmt.Errorf("%w: rim=%s/%s report=%s/%s", ErrRIMVersionMismatch,
+			rim.DriverVersion, rim.VBIOSVersion, driver, vbios)
+	}
+	signed := make(map[uint8][]byte, len(blocks))
+	for _, b := range blocks {
+		signed[b.Index] = b.Value
+	}
+	for _, e := range rim.Entries {
+		if e.Index == nil {
+			return fmt.Errorf("%w: name=%s", ErrRIMEntryNoIndex, e.Name)
+		}
+		want, err := hex.DecodeString(strings.TrimPrefix(e.ValueHex, "0x"))
+		if err != nil {
+			return fmt.Errorf("nvidia/rim: bad entry hex %q: %w", e.Name, err)
+		}
+		got, ok := signed[*e.Index]
+		if !ok {
+			return fmt.Errorf("%w: name=%s index=%d (no signed block)", ErrRIMMissingEntry, e.Name, *e.Index)
+		}
+		if !bytesEqual(want, got) {
+			return fmt.Errorf("%w: name=%s index=%d", ErrRIMValueMismatch, e.Name, *e.Index)
 		}
 	}
 	return nil
