@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/hero.svg" alt="cc" width="880"></p>
+
 # luxfi/cc — Confidential Compute attestation
 
 `github.com/luxfi/cc` is the **single, vendor-neutral attestation verifier**
