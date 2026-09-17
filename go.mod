@@ -1,6 +1,6 @@
 module github.com/luxfi/cc
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.2
